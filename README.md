@@ -98,34 +98,89 @@ python -m uvicorn maintain_x.live_api:app --host 127.0.0.1 --port 8000
 
 The Groq variables are optional. Never put credentials in frontend environment variables, QR labels, source control, or sensor payloads.
 
-## Connect a machine
+## Connect sensors to the dashboard
 
-1. In the dashboard, choose **Add machine** and provide a machine ID, display name, equipment type, and criticality.
-2. Optionally configure machine-specific limits for process temperature, torque, RPM, and tool wear. Otherwise, the machine uses the shared limits.
-3. For custom limits, cite a manufacturer document or site-engineering reference. These limits trigger dashboard alerts; they are **not machine controls**.
-4. Configure the trusted gateway with the ingest token supplied to the API process.
-
-### REST ingestion
-
-Send a JSON `POST` request to:
+MAINTAIN-X does not connect directly to a sensor or translate a vendor-specific protocol. The data path is:
 
 ```text
-http://127.0.0.1:8000/api/ingest/v1/readings
+Sensor → PLC / vendor gateway / edge adapter → MAINTAIN-X API → SQLite → dashboard
 ```
 
-Required headers:
+The gateway or adapter must read the physical sensor values, map them to the MAINTAIN-X JSON fields, and send readings using **REST** or publish them to an **MQTT broker** that MAINTAIN-X can reach. Browser WebSockets are only used to refresh the dashboard; sensors must not send data to the browser or `/ws`.
+
+### 1. Register the machine
+
+In the dashboard, select **Add machine** and enter:
+
+- A unique machine ID, such as `PRESS-01`
+- A display name, such as `North line hydraulic press`
+- Equipment type and criticality
+- Optionally, machine-specific alert limits supported by a manufacturer document or site-engineering reference
+
+The gateway must send the same machine ID with every reading. It is the identifier used to associate measurements with the asset. Registering the asset first lets you set its display name, criticality, and limits before readings arrive. If a reading arrives for an unregistered ID, the API may create an asset using that ID as its initial name; register it in the dashboard afterward to manage its metadata.
+
+Limits only generate dashboard alerts; they are **not machine controls**. Use engineering-approved values. Otherwise, the asset inherits the shared dashboard limits.
+
+### 2. Choose how the gateway sends readings
+
+| Method | Data path | Use it when |
+| --- | --- | --- |
+| REST | Gateway sends an authenticated HTTP `POST` directly to the MAINTAIN-X API | You want a direct, request/response integration |
+| MQTT | Gateway publishes to a broker; MAINTAIN-X subscribes to the broker | Your site already uses MQTT or multiple consumers need the same stream |
+
+Choose one or both methods. For either method, the gateway must be on the same host/network path as the API or broker, and its machine IDs and measurement names must match the examples below.
+
+### REST: send readings over HTTP
+
+#### Configure ingestion
+
+Start the API with a strong `MAINTAINX_INGEST_TOKEN`. The Windows launcher asks for it using hidden input. **Do not press Enter at this prompt** if you want to accept device readings; a blank token leaves ingestion disabled. Give the same token to the trusted gateway using its secure secret store, not a source file or sensor payload. Restart the API after changing the token.
+
+The local development endpoint is:
 
 ```text
+POST http://127.0.0.1:8000/api/ingest/v1/readings
 Authorization: Bearer <YOUR_INGEST_TOKEN>
 Content-Type: application/json
 ```
 
-Example body:
+`127.0.0.1` means “this computer.” It works only when the gateway runs on the same computer as the API. For a gateway on another host, place the API behind a secured private network or VPN and deliberately configure a reachable private interface, firewall rules, and HTTPS/transport protection. Do not expose the development server directly to the public internet. Use the full API address reachable from the gateway in place of `127.0.0.1`.
+
+#### Send a test reading from PowerShell
+
+With the API running, replace the sample ID and enter the same ingest token configured at API startup:
+
+```powershell
+$token = Read-Host "Sensor ingest token"
+$headers = @{ Authorization = "Bearer $token" }
+$body = @{
+  machine_id = "PRESS-01"
+  equipment_type = "Hydraulic press"
+  air_temperature = 28.0
+  process_temperature = 71.2
+  rotational_speed = 1480
+  torque = 82
+  tool_wear = 140
+  operating_state = "RUNNING"
+} | ConvertTo-Json
+
+Invoke-RestMethod `
+  -Method Post `
+  -Uri "http://127.0.0.1:8000/api/ingest/v1/readings" `
+  -Headers $headers `
+  -ContentType "application/json" `
+  -Body $body
+```
+
+An accepted reading returns HTTP `200` and a JSON record. The API stores it and notifies the dashboard; a REST source indicator and the latest values should appear for the matching asset.
+
+#### Payload reference
 
 ```json
 {
   "machine_id": "PRESS-01",
   "equipment_type": "Hydraulic press",
+  "timestamp": "2026-10-25T12:00:00Z",
   "air_temperature": 28.0,
   "process_temperature": 71.2,
   "rotational_speed": 1480,
@@ -135,13 +190,58 @@ Example body:
 }
 ```
 
-At least one numeric measurement is required. Supported measurements are `air_temperature`, `process_temperature`, `rotational_speed`, `torque`, and `tool_wear`. `timestamp` and `operating_state` are optional. Send actual available measurements; missing values are treated as data-quality gaps, not estimated values. Use a consistent `machine_id` to associate incoming readings with the dashboard asset.
+`machine_id` is required. At least one numeric sensor value is also required. `equipment_type` defaults to `Industrial equipment`; `timestamp` and `operating_state` are optional. The supported numeric fields are:
 
-The API accepts readings only when `MAINTAINX_INGEST_TOKEN` is configured and the bearer token matches. A successful `200` response indicates the reading was accepted.
+| JSON field | Meaning | Example unit |
+| --- | --- | --- |
+| `air_temperature` | Ambient air temperature | °C |
+| `process_temperature` | Machine/process temperature | °C |
+| `rotational_speed` | Rotational speed | RPM |
+| `torque` | Torque | Nm |
+| `tool_wear` | Tool-wear index | Application-specific |
 
-### MQTT ingestion
+Send numbers (or `null` where no reading is available), not formatted strings with units. Include a timestamp when the gateway has one; the API uses its receipt time if it is omitted. Do not fabricate values for disconnected or unavailable sensors. Missing and invalid measurements are handled as data-quality issues.
 
-MQTT is optional and starts only when `MQTT_BROKER_HOST` is set. Configure the broker, topic, and any credentials in the backend environment. TLS port `8883` is the default. MQTT messages use the same JSON fields and machine-ID mapping as REST.
+### MQTT: publish readings through a broker
+
+In MQTT mode, the MAINTAIN-X API is the **broker client/subscriber**; the gateway publishes to your broker. Configure these values in the **API server's process environment** before starting it:
+
+| Variable | Description | Default |
+| --- | --- | --- |
+| `MQTT_BROKER_HOST` | Reachable broker hostname/IP; enables MQTT | Not configured |
+| `MQTT_BROKER_PORT` | Broker port | `8883` with TLS; otherwise `1883` |
+| `MQTT_TLS` | Enable TLS when set to `1` | `1` |
+| `MQTT_USERNAME` | Optional broker username | Empty |
+| `MQTT_PASSWORD` | Optional broker password | Empty |
+| `MQTT_CLIENT_ID` | MAINTAIN-X subscriber client ID | `maintain-x-dashboard` |
+| `MQTT_TOPIC` | Topic MAINTAIN-X subscribes to | `maintain-x/+/readings` |
+
+Set the broker hostname and any credentials in the backend process environment; never place MQTT credentials in frontend settings. Restart the API after changing MQTT configuration. The dashboard's **Connections** view reports whether a broker is configured and connected.
+
+Configure the gateway to publish the same JSON body as the REST example to a topic matching the subscriber filter. With the default filter, a topic such as `maintain-x/PRESS-01/readings` matches. The MQTT topic does not replace the required `machine_id` in the JSON body: both should identify the same asset. MQTT messages do not use the REST bearer header; secure MQTT access with broker authentication, TLS, and network policy. The API subscribes at QoS 1.
+
+### 3. Confirm the data is flowing
+
+1. Keep the API process running and open the dashboard.
+2. Check the **Connections** view for the REST token status or MQTT broker connection.
+3. Send a test reading with the exact registered machine ID.
+4. Confirm the machine's latest timestamp, measurements, and source (`REST` or `MQTT`) update.
+5. Send a reading beyond a configured alert threshold to verify the dashboard event flow, if safe and appropriate for your test data.
+
+Simulation profiles are separate demonstration assets and update independently. Pause simulation in the dashboard if you want to focus on real-device readings.
+
+### Troubleshooting
+
+| Symptom | Check |
+| --- | --- |
+| REST returns `503` | The API has no `MAINTAINX_INGEST_TOKEN`; restart it and enter a token at the hidden prompt. |
+| REST returns `401` | The gateway's bearer token does not exactly match the API token. |
+| REST returns `422` | Check required `machine_id`, JSON syntax/types, field names, and that at least one numeric measurement is present. |
+| REST cannot connect | Confirm the API is running on port `8000`. `127.0.0.1` only works for a gateway on the API host; check private routing and firewall rules for remote gateways. |
+| MQTT says “Not configured” | `MQTT_BROKER_HOST` is missing from the API process environment; restart after setting it. |
+| MQTT cannot connect | Check broker address/port, TLS setting, credentials, certificate trust, broker logs, and network/firewall access. |
+| Reading is on a different asset or a duplicate-looking row appears | Ensure the JSON `machine_id` exactly matches the dashboard asset ID on every message. |
+| No current/connected indication | Check that readings continue arriving and that gateway timestamps are valid/current; old readings can be marked stale. |
 
 ## Assistant, events, and reports
 
