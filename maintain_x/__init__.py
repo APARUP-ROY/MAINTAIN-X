@@ -1,0 +1,1 @@
+"""MAINTAIN-X synthetic predictive-maintenance demonstration."""
