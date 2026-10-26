@@ -1,11 +1,12 @@
 import { useEffect, useState } from 'react'
 import type { FormEvent } from 'react'
 import {
-  Activity, AlertCircle, AlertTriangle, ArrowDownToLine, ArrowLeft, ArrowRight,
+  Activity, AlertCircle, AlertTriangle, Anchor, ArrowDownToLine, ArrowLeft, ArrowRight,
   Bot, Check, CheckCircle2, ChevronDown, ChevronRight, CircleHelp, Clock3,
-  Copy, Download, Gauge, HardDrive, Link2, LoaderCircle, MessageSquare,
-  Plus, QrCode, Radio, RefreshCw, Search, Send, Settings2, ShieldCheck,
-  Thermometer, Wrench, X, Zap,
+  Code, Copy, Cpu, Download, Gauge, HardDrive, Link2,
+  LoaderCircle, MessageSquare, Plus, Printer, QrCode, Radio, RefreshCw,
+  Search, Send, Settings2, ShieldCheck, Sliders, Terminal, Thermometer,
+  Wrench, X, Zap,
 } from 'lucide-react'
 import { QRCodeSVG } from 'qrcode.react'
 import {
@@ -283,16 +284,329 @@ function Modal({ title, close, children, wide = false, className = '' }: { title
   </div>
 }
 
-function QRModal({ machines, close }: { machines: Machine[]; close: () => void }) {
+function QRModal({ machines, sharedLimits, close, onConnect }: { machines: Machine[]; sharedLimits: Limits; close: () => void; onConnect: (machine: Machine) => void }) {
   const [copied, setCopied] = useState('')
-  async function copy(value: string, id: string) { await navigator.clipboard.writeText(value); setCopied(id); window.setTimeout(() => setCopied(''), 1500) }
-  return <Modal title="Machine identification labels" close={close} wide className="qr-modal">
-    <p className="modal-intro">Each QR opens that machine’s MAINTAIN-X detail view at <code>{QR_DASHBOARD_URL}</code>. Scanning does not pair or configure a sensor; telemetry requires a separately provisioned gateway connection.</p>
+  const [qrMode, setQrMode] = useState<'url' | 'provisioning'>('url')
+
+  const handlePrint = () => {
+    const prev = document.body.style.overflow
+    document.body.style.overflow = 'visible'
+    window.print()
+    window.setTimeout(() => { document.body.style.overflow = prev }, 600)
+  }
+
+  async function copy(value: string, id: string) {
+    await navigator.clipboard.writeText(value)
+    setCopied(id)
+    window.setTimeout(() => setCopied(''), 1500)
+  }
+
+  return <Modal title="Machine identification & sensor labels" close={close} wide className="qr-modal">
+    <div className="qr-print-header">
+      <h2>MAINTAIN-X ASSET IDENTIFICATION &amp; OPERATING SPECIFICATIONS</h2>
+      <p>Scan with a smartphone or barcode gateway to view live telemetry and sensor firmware code. Printed: {new Date().toLocaleDateString()} {new Date().toLocaleTimeString()}</p>
+    </div>
+    <div className="no-print">
+      <p className="modal-intro">Each QR label encodes this machine’s deep link at <code>{QR_DASHBOARD_URL}</code> or direct provisioning credentials. Print labels for equipment chassis or scan with a smartphone camera to view live sensor code and connection instructions.</p>
+      <div className="qr-mode-switch">
+        <button className={qrMode === 'url' ? 'active' : ''} onClick={() => setQrMode('url')}>Mobile Web Link QR</button>
+        <button className={qrMode === 'provisioning' ? 'active' : ''} onClick={() => setQrMode('provisioning')}>Direct Gateway Provisioning JSON</button>
+      </div>
+    </div>
     {machines.length === 0 ? <p className="empty-note">Register an asset before creating its label.</p> : <div className="qr-grid">{machines.map(machine => {
-      const url = `${QR_DASHBOARD_URL}/?asset=${encodeURIComponent(machine.machine_id)}`
-      return <article className="qr-label" key={machine.machine_id}><QRCodeSVG value={url} size={116} level="M" includeMargin /><div><p className="eyebrow">EQUIPMENT ID</p><h3>{machine.machine_name || machine.machine_id}</h3><p>{machine.machine_id} · {machine.equipment_type}</p><button className="button-secondary small-button" onClick={() => void copy(url, machine.machine_id)}>{copied === machine.machine_id ? <Check size={14} /> : <Copy size={14} />}{copied === machine.machine_id ? 'Copied' : 'Copy asset link'}</button></div></article>
+      const url = `${QR_DASHBOARD_URL}/?connect=${encodeURIComponent(machine.machine_id)}`
+      const provJson = JSON.stringify({ schema: 'maintain-x/v1', machine_id: machine.machine_id, equipment_type: machine.equipment_type })
+      const qrVal = qrMode === 'url' ? url : provJson
+      const prof = machine.limit_profile?.mode === 'custom' ? machine.limit_profile : sharedLimits
+
+      return <article className="qr-label" key={machine.machine_id}>
+        <QRCodeSVG value={qrVal} size={116} level="M" includeMargin />
+        <div>
+          <p className="eyebrow">EQUIPMENT ID</p>
+          <h3>{machine.machine_name || machine.machine_id}</h3>
+          <p>{machine.machine_id} · {machine.equipment_type} · ×{machine.criticality.toFixed(1)}</p>
+          <div className="qr-label-limits">
+            <span>Temp max: {prof.process_temperature}°C</span>
+            <span>Torque max: {prof.torque} Nm</span>
+            <span>Speed: {prof.rotational_speed_low}–{prof.rotational_speed_high} rpm</span>
+            <span>Wear max: {prof.tool_wear}</span>
+          </div>
+          <div className="no-print" style={{ display: 'flex', gap: '6px', marginTop: '8px' }}>
+            <button className="button-primary small-button" onClick={() => onConnect(machine)}>
+              <Radio size={13} /> Connect sensor
+            </button>
+            <button className="button-secondary small-button" onClick={() => void copy(url, machine.machine_id)}>
+              {copied === machine.machine_id ? <Check size={13} /> : <Copy size={13} />}
+              {copied === machine.machine_id ? 'Copied' : 'Copy link'}
+            </button>
+          </div>
+        </div>
+      </article>
     })}</div>}
-    <div className="modal-footer"><button className="button-secondary" onClick={() => window.print()}><Download size={15} /> Print labels</button></div>
+    <div className="modal-footer no-print">
+      <button className="button-secondary" onClick={handlePrint}><Printer size={15} /> Print labels</button>
+    </div>
+  </Modal>
+}
+
+function SensorConnectModal({
+  machine,
+  shared,
+  connections,
+  close,
+  onReadingSent,
+}: {
+  machine: Machine
+  shared: Limits
+  connections: Dashboard['connections']
+  close: () => void
+  onReadingSent: () => void
+}) {
+  const [activeTab, setActiveTab] = useState<'esp32' | 'python' | 'curl' | 'json'>('esp32')
+  const [qrMode, setQrMode] = useState<'url' | 'provisioning'>('url')
+  const [gatewayHost, setGatewayHost] = useState(window.location.hostname || '127.0.0.1')
+  const [token, setToken] = useState('replace-with-a-long-random-secret')
+  const [copied, setCopied] = useState(false)
+  const [testing, setTesting] = useState(false)
+  const [testResult, setTestResult] = useState<{ status: 'success' | 'error'; text: string } | null>(null)
+
+  const limits = machine.limit_profile?.mode === 'custom' ? machine.limit_profile : shared
+  const ingestUrl = `http://${gatewayHost}:${connections.rest.port}/api/ingest/v1/readings`
+  const connectUrl = `${QR_DASHBOARD_URL}/?connect=${encodeURIComponent(machine.machine_id)}`
+  const provJson = JSON.stringify({
+    schema: 'maintain-x/v1',
+    machine_id: machine.machine_id,
+    equipment_type: machine.equipment_type,
+    ingest_url: ingestUrl,
+    token: token,
+  }, null, 2)
+  const qrValue = qrMode === 'url' ? connectUrl : provJson
+
+  const esp32Code = `/*
+ * MAINTAIN-X Sensor Transmitter for ${machine.machine_name || machine.machine_id}
+ * Machine ID: ${machine.machine_id}
+ * Target: ESP32 / Arduino WiFi
+ */
+#include <WiFi.h>
+#include <HTTPClient.h>
+
+const char* WIFI_SSID = "YOUR_WIFI_SSID";
+const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
+const char* INGEST_URL = "${ingestUrl}";
+const char* INGEST_TOKEN = "${token}";
+const char* MACHINE_ID = "${machine.machine_id}";
+
+void setup() {
+  Serial.begin(115200);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  Serial.print("Connecting to WiFi");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\\nWiFi Connected! IP: " + WiFi.localIP().toString());
+}
+
+void loop() {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    http.begin(INGEST_URL);
+    http.addHeader("Content-Type", "application/json");
+    if (strlen(INGEST_TOKEN) > 0) {
+      http.addHeader("Authorization", String("Bearer ") + INGEST_TOKEN);
+    }
+
+    // Read your physical sensors (MAX6675, CT clamp, optical tachometer):
+    float process_temp = 68.2;  // Usable limit: ${limits.process_temperature} C
+    float rpm = 1480.0;         // Usable band: ${limits.rotational_speed_low}-${limits.rotational_speed_high} rpm
+    float torque = 74.5;        // Usable limit: ${limits.torque} Nm
+    float tool_wear = 120.0;    // Indicator limit: ${limits.tool_wear}
+
+    String json = "{\\"machine_id\\":\\"" + String(MACHINE_ID) + "\\","
+      + "\\"equipment_type\\":\\"${machine.equipment_type}\\","
+      + "\\"process_temperature\\":" + String(process_temp, 2) + ","
+      + "\\"rotational_speed\\":" + String(rpm, 1) + ","
+      + "\\"torque\\":" + String(torque, 2) + ","
+      + "\\"tool_wear\\":" + String(tool_wear, 1) + ","
+      + "\\"operating_state\\":\\"RUNNING\\"}";
+
+    int code = http.POST(json);
+    Serial.printf("[HTTP] POST code: %d\\n", code);
+    http.end();
+  }
+  delay(2000);
+}`
+
+  const pythonCode = `"""
+MAINTAIN-X Industrial Sensor Station
+Machine: ${machine.machine_name || machine.machine_id} (${machine.machine_id})
+Target: Raspberry Pi / Linux Gateway / Edge PC
+"""
+import time
+import requests
+
+INGEST_URL = "${ingestUrl}"
+INGEST_TOKEN = "${token}"
+MACHINE_ID = "${machine.machine_id}"
+EQUIPMENT_TYPE = "${machine.equipment_type}"
+
+def read_hardware_sensors():
+    # Replace with real ADC / GPIO / I2C / SPI sensor reading calls:
+    return {
+        "process_temperature": 68.5,  # Usable limit: ${limits.process_temperature} C
+        "air_temperature": 26.0,
+        "rotational_speed": 1490.0,   # Usable band: ${limits.rotational_speed_low} - ${limits.rotational_speed_high} rpm
+        "torque": 76.2,               # Usable limit: ${limits.torque} Nm
+        "tool_wear": 125.0,           # Indicator limit: ${limits.tool_wear}
+        "operating_state": "RUNNING",
+    }
+
+def main():
+    print(f"Starting MAINTAIN-X stream for {MACHINE_ID} -> {INGEST_URL}")
+    headers = {"Content-Type": "application/json"}
+    if INGEST_TOKEN:
+        headers["Authorization"] = f"Bearer {INGEST_TOKEN}"
+
+    while True:
+        try:
+            payload = {
+                "machine_id": MACHINE_ID,
+                "equipment_type": EQUIPMENT_TYPE,
+                **read_hardware_sensors(),
+            }
+            res = requests.post(INGEST_URL, json=payload, headers=headers, timeout=5)
+            print(f"[{res.status_code}] Delivered: Risk={res.json().get('assessment', {}).get('risk')}")
+        except Exception as e:
+            print(f"[FAIL] Error posting reading: {e}")
+        time.sleep(2.0)
+
+if __name__ == "__main__":
+    main()`
+
+  const curlCode = `curl -X POST ${ingestUrl} \\
+  -H "Authorization: Bearer ${token}" \\
+  -H "Content-Type: application/json" \\
+  -d '{"machine_id":"${machine.machine_id}","equipment_type":"${machine.equipment_type}","process_temperature":68.5,"rotational_speed":1480,"torque":75.0,"tool_wear":120,"operating_state":"RUNNING"}'`
+
+  const activeCode = activeTab === 'esp32' ? esp32Code : activeTab === 'python' ? pythonCode : activeTab === 'curl' ? curlCode : provJson
+
+  const copyCode = async () => {
+    await navigator.clipboard.writeText(activeCode)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 1500)
+  }
+
+  const sendTestPacket = async () => {
+    setTesting(true)
+    setTestResult(null)
+    try {
+      const payload = {
+        machine_id: machine.machine_id,
+        equipment_type: machine.equipment_type,
+        process_temperature: Number((limits.process_temperature * 0.9).toFixed(1)),
+        rotational_speed: Number(((limits.rotational_speed_low + limits.rotational_speed_high) / 2).toFixed(1)),
+        torque: Number((limits.torque * 0.85).toFixed(1)),
+        tool_wear: Number((limits.tool_wear * 0.5).toFixed(1)),
+        operating_state: 'RUNNING',
+      }
+      const response = await fetch(`${API}/api/ingest/v1/readings`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify(payload),
+      })
+      if (!response.ok) {
+        const err = await response.json().catch(() => ({ detail: response.statusText }))
+        throw new Error(err.detail ?? `HTTP ${response.status}`)
+      }
+      const data = await response.json()
+      setTestResult({
+        status: 'success',
+        text: `✓ Live reading delivered! Evaluated risk: "${data?.assessment?.risk ?? 'Normal'}". Machine is now active on the dashboard.`,
+      })
+      onReadingSent()
+    } catch (err) {
+      setTestResult({
+        status: 'error',
+        text: `✗ Ingest failed: ${err instanceof Error ? err.message : 'Could not deliver telemetry.'} Check your INGEST_TOKEN in server settings.`,
+      })
+    } finally {
+      setTesting(false)
+    }
+  }
+
+  return <Modal title={`Connect Sensor · ${machine.machine_name || machine.machine_id}`} close={close} wide className="qr-modal">
+    <div className="no-print">
+      <p className="modal-intro">
+        Flash or execute this pre-configured sensor firmware on your microcontroller or edge gateway. Scanning the QR code from any camera opens this machine setup page instantly.
+      </p>
+
+      {/* Machine & Usable Limits Summary */}
+      <div className="sensor-connect-summary">
+        <div><span className="eyebrow">EQUIPMENT</span><strong>{machine.machine_name || machine.machine_id}</strong><span>ID: {machine.machine_id}</span></div>
+        <div><span className="eyebrow">EQUIPMENT TYPE</span><strong>{machine.equipment_type}</strong><span>Criticality ×{machine.criticality.toFixed(1)}</span></div>
+        <div><span className="eyebrow">USABLE TEMP LIMIT</span><strong>{limits.process_temperature} °C</strong><span>Max threshold</span></div>
+        <div><span className="eyebrow">USABLE TORQUE LIMIT</span><strong>{limits.torque} Nm</strong><span>Max threshold</span></div>
+        <div><span className="eyebrow">USABLE SPEED BAND</span><strong>{limits.rotational_speed_low}–{limits.rotational_speed_high} rpm</strong><span>Operating envelope</span></div>
+        <div><span className="eyebrow">TOOL WEAR LIMIT</span><strong>{limits.tool_wear} index</strong><span>Inspection trigger</span></div>
+      </div>
+
+      {/* QR Code and Gateway Config Row */}
+      <div style={{ display: 'grid', gridTemplateColumns: 'auto 1fr', gap: '16px', margin: '14px 0', alignItems: 'center', padding: '14px', border: '1px solid var(--mist)', borderRadius: '8px', background: 'var(--paper)' }}>
+        <div style={{ display: 'grid', justifyItems: 'center', gap: '6px' }}>
+          <QRCodeSVG value={qrValue} size={110} level="M" includeMargin />
+          <div className="qr-mode-switch" style={{ margin: 0 }}>
+            <button className={qrMode === 'url' ? 'active' : ''} onClick={() => setQrMode('url')}>Link</button>
+            <button className={qrMode === 'provisioning' ? 'active' : ''} onClick={() => setQrMode('provisioning')}>JSON</button>
+          </div>
+        </div>
+        <div style={{ display: 'grid', gap: '10px' }}>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '10px' }}>
+            <label style={{ display: 'grid', gap: '4px', fontSize: '10px', fontWeight: 600, color: 'var(--graphite)' }}>
+              Gateway / Server Host IP
+              <input value={gatewayHost} onChange={e => setGatewayHost(e.target.value)} placeholder="192.168.1.100 or 127.0.0.1" style={{ height: '32px', padding: '4px 8px', border: '1px solid var(--mist)', borderRadius: '4px', fontSize: '11px' }} />
+            </label>
+            <label style={{ display: 'grid', gap: '4px', fontSize: '10px', fontWeight: 600, color: 'var(--graphite)' }}>
+              Ingest Token (Bearer)
+              <input value={token} onChange={e => setToken(e.target.value)} placeholder="MAINTAINX_INGEST_TOKEN" style={{ height: '32px', padding: '4px 8px', border: '1px solid var(--mist)', borderRadius: '4px', fontSize: '11px' }} />
+            </label>
+          </div>
+          <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+            <button className="button-primary small-button" onClick={sendTestPacket} disabled={testing}>
+              {testing ? <LoaderCircle size={14} className="spin" /> : <Zap size={14} />}
+              Send live test reading
+            </button>
+            <span style={{ fontSize: '10px', color: 'var(--slate)' }}>Verify endpoint connectivity directly from browser</span>
+          </div>
+          {testResult && (
+            <div className={`tester-response ${testResult.status}`}>
+              {testResult.text}
+            </div>
+          )}
+        </div>
+      </div>
+
+      {/* Code Viewer */}
+      <div className="code-generator-section">
+        <div className="code-lang-tabs">
+          <button className={`code-lang-tab ${activeTab === 'esp32' ? 'active' : ''}`} onClick={() => setActiveTab('esp32')}><Cpu size={13} style={{ marginRight: 4 }} /> ESP32 / Arduino (C++)</button>
+          <button className={`code-lang-tab ${activeTab === 'python' ? 'active' : ''}`} onClick={() => setActiveTab('python')}><Terminal size={13} style={{ marginRight: 4 }} /> Raspberry Pi / Python</button>
+          <button className={`code-lang-tab ${activeTab === 'curl' ? 'active' : ''}`} onClick={() => setActiveTab('curl')}><Code size={13} style={{ marginRight: 4 }} /> cURL Command</button>
+          <button className={`code-lang-tab ${activeTab === 'json' ? 'active' : ''}`} onClick={() => setActiveTab('json')}><Sliders size={13} style={{ marginRight: 4 }} /> Raw JSON</button>
+        </div>
+        <div className="code-display-wrap">
+          <div className="code-display-actions">
+            <button className="code-copy-btn" onClick={copyCode}>
+              {copied ? <Check size={13} /> : <Copy size={13} />}
+              {copied ? 'Copied code' : 'Copy code'}
+            </button>
+          </div>
+          <pre><code>{activeCode}</code></pre>
+        </div>
+      </div>
+    </div>
   </Modal>
 }
 
@@ -317,13 +631,13 @@ function ConnectionModal({ connections, close }: { connections: Dashboard['conne
   </Modal>
 }
 
-function MachineDetail({ machine, onBack, onReport, onChat, onQR, onLogAction, onRemove }: { machine: Machine; onBack: () => void; onReport: () => void; onChat: () => void; onQR: () => void; onLogAction: () => void; onRemove: () => void }) {
+function MachineDetail({ machine, onBack, onReport, onChat, onQR, onLogAction, onRemove, onConnect }: { machine: Machine; onBack: () => void; onReport: () => void; onChat: () => void; onQR: () => void; onLogAction: () => void; onRemove: () => void; onConnect: () => void }) {
   const [history, setHistory] = useState<Record<string, number | string | null>[]>([])
   useEffect(() => { void request<Record<string, number | string | null>[]>(`/api/machines/${encodeURIComponent(machine.machine_id)}/history?limit=90`).then(setHistory).catch(() => setHistory([])) }, [machine.machine_id, machine.timestamp])
   const series = history.map(row => ({ ...row, time: row.timestamp ? new Date(row.timestamp).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', second: '2-digit' }) : '' }))
   return <section className="detail-view">
     <button className="back-link" onClick={onBack}><ArrowLeft size={15} /> Fleet overview</button>
-    <div className="detail-title"><div><p className="eyebrow">ASSET INTELLIGENCE / {machine.equipment_type.toUpperCase()}</p><h1>{machine.machine_name || machine.machine_id}</h1><p className="detail-subtitle">ID: {machine.machine_id} <span>·</span> {machine.equipment_type} <span>·</span> Criticality ×{machine.criticality.toFixed(1)} <span>·</span> {machine.operating_state ?? 'Awaiting data'}</p></div><div className="detail-actions"><RiskPill risk={machine.risk} /><button className="button-secondary" onClick={onReport}><ArrowDownToLine size={15} /> Report</button><button className="button-secondary" onClick={onLogAction}><Wrench size={15} /> Log action</button><button className="button-secondary" onClick={onQR}><QrCode size={15} /> QR label</button><button className="button-primary" onClick={onChat}><MessageSquare size={15} /> Ask assistant</button></div></div>
+    <div className="detail-title"><div><p className="eyebrow">ASSET INTELLIGENCE / {machine.equipment_type.toUpperCase()}</p><h1>{machine.machine_name || machine.machine_id}</h1><p className="detail-subtitle">ID: {machine.machine_id} <span>·</span> {machine.equipment_type} <span>·</span> Criticality ×{machine.criticality.toFixed(1)} <span>·</span> {machine.operating_state ?? 'Awaiting data'}</p></div><div className="detail-actions"><RiskPill risk={machine.risk} /><button className="button-primary" onClick={onConnect}><Radio size={14} /> Connect sensor</button><button className="button-secondary" onClick={onReport}><ArrowDownToLine size={15} /> Report</button><button className="button-secondary" onClick={onLogAction}><Wrench size={15} /> Log action</button><button className="button-secondary" onClick={onQR}><QrCode size={15} /> QR label</button><button className="button-primary" onClick={onChat}><MessageSquare size={15} /> Ask assistant</button></div></div>
     <div className="asset-detail-toolbar"><span className={`source-tag source-${machine.source ?? 'waiting'}`}>{machine.source === 'synthetic-demo' ? 'SIMULATED · 1 SECOND' : machine.source ? `DEVICE · ${machine.source.toUpperCase()}` : 'WAITING FOR DATA'}</span><span className="source-explainer">{machine.source === 'synthetic-demo' ? 'Generated demonstration readings; not from a physical sensor.' : machine.source ? 'Latest source: connected gateway.' : 'No sensor has reported for this registered asset.'}</span><button className="button-secondary small-button remove-device" onClick={onRemove}><X size={13} /> Remove asset</button></div>
     {!machine.id ? <div className="no-reading-banner"><Clock3 size={18} /><div><strong>No readings received.</strong><p>This asset is registered and awaiting a connected gateway or an explicitly enabled demo stream.</p></div></div> : <>
       <div className="sensor-grid">
@@ -437,7 +751,8 @@ function App() {
   const [riskFilter, setRiskFilter] = useState('All risks')
   const [search, setSearch] = useState('')
   const [selectedId, setSelectedId] = useState(new URLSearchParams(window.location.search).get('asset') ?? '')
-  const [modal, setModal] = useState<'register' | 'qr' | 'connections' | 'report' | 'action' | 'remove' | null>(null)
+  const [modal, setModal] = useState<'register' | 'qr' | 'connections' | 'report' | 'action' | 'remove' | 'sensor-connect' | null>(null)
+  const [sensorConnectMachine, setSensorConnectMachine] = useState<Machine | null>(null)
   const [chatOpen, setChatOpen] = useState(false)
   const [limits, setLimits] = useState<Limits>(fallbackLimits)
   const [settingsMessage, setSettingsMessage] = useState('')
@@ -453,6 +768,19 @@ function App() {
       const url = new URL(window.location.href); url.searchParams.set('asset', selectedId); window.history.replaceState({}, '', url)
     }
   }, [selectedId, machines])
+
+  // Handle deep-link QR connection (e.g. ?connect=PRESS-01)
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search)
+    const connectId = params.get('connect')
+    if (connectId && machines.length > 0) {
+      const found = machines.find(m => m.machine_id === connectId)
+      if (found) {
+        setSensorConnectMachine(found)
+        setModal('sensor-connect')
+      }
+    }
+  }, [machines])
 
   const filteredMachines = machines.filter(machine =>
     (riskFilter === 'All risks' || machine.risk.toLowerCase() === riskFilter.toLowerCase()) &&
@@ -503,15 +831,38 @@ function App() {
       <div className={`demo-banner ${data?.connections.simulation.enabled ? 'simulation-banner' : ''}`}><span className="banner-icon"><Radio size={15} /></span><span><strong>{data?.connections.simulation.enabled ? 'ONE-SECOND SIMULATION ACTIVE' : 'LIVE DEVICE READINGS'}</strong><span className="banner-separator">/</span> {data?.connections.simulation.enabled ? 'Clearly labeled generated signals are updating every second to demonstrate the live workflow; they are not physical sensor measurements.' : 'Only readings received from connected devices are displayed.'}</span><button aria-label="About data sources" title="Source badges distinguish generated readings from REST and MQTT device data."><CircleHelp size={15} /></button></div>
       {simulationError && <div className="api-error"><AlertCircle size={15} />{simulationError}</div>}
 
-      {view === 'Connections' ? <section className="section-view"><div className="section-heading"><div><p className="eyebrow">DEVICE NETWORK</p><h1>Connections</h1><p>Authenticated ingress and gateway readiness. No field device is considered connected until its first reading.</p></div><button className="button-primary" onClick={() => setModal('connections')}><Link2 size={15} /> Setup guide</button></div>
+      {view === 'Connections' ? <section className="section-view"><div className="section-heading"><div><p className="eyebrow">DEVICE NETWORK</p><h1>Connections &amp; Sensor Setup</h1><p>Authenticated ingress, individual machine usable limits, and physical sensor hardware connection guide.</p></div><button className="button-primary" onClick={() => setModal('connections')}><Link2 size={15} /> Setup guide</button></div>
         <div className="connection-cards"><ConnectionCard icon={<Link2 size={18} />} title="REST sensor gateway" status={data?.connections.rest.configured ? `${data.metrics.real_connected} device(s) recently reporting` : 'Needs server token'} port={data?.connections.rest.port ?? 8000} detail="HTTP JSON ingestion · authenticated gateway" endpoint="/api/ingest/v1/readings" /><ConnectionCard icon={<Radio size={18} />} title="MQTT broker" status={data?.connections.mqtt.connected ? 'Connected' : data?.connections.mqtt.configured ? 'Configured · offline' : 'Optional · not configured'} port={data?.connections.mqtt.port ?? 8883} detail={data?.connections.mqtt.detail ?? 'TLS enabled by default'} endpoint={data?.connections.mqtt.host || 'Set MQTT_BROKER_HOST on the API server'} /><ConnectionCard icon={<Activity size={18} />} title="One-second demo feed" status={data?.connections.simulation.enabled ? 'Running' : 'Paused'} port={data?.connections.rest.port ?? 8000} detail={`${data?.connections.simulation.machines ?? 0} generated profiles · tick ${data?.connections.simulation.tick ?? 0}`} endpoint="Control from the Fleet view · not an IoT connection" /></div>
-        <section className="panel settings-panel"><div className="panel-heading"><div><p className="eyebrow">ENGINEERING ASSUMPTIONS</p><h2>Alert limits & downtime scenario</h2><p className="panel-subtitle">Set site-reviewed alert bounds and planning assumptions. Defaults are examples, not universal safety thresholds or plant cost data.</p></div><Settings2 size={18} /></div>
+        
+        {/* Real Sensor Hardware & Firmware Guide */}
+        <RealSensorsGuide
+          machines={machines}
+          shared={limits}
+          connections={data?.connections ?? { rest: { name: 'REST', port: 8000, configured: false, endpoint: 'http://127.0.0.1:8000/api/ingest/v1/readings' }, mqtt: { configured: false, connected: false, detail: 'Not configured', host: '', port: 8883 }, websocket: 'ws://127.0.0.1:8000/ws', simulation: { enabled: false, source: 'synthetic-demo', tick: 0, interval_seconds: 1, machines: 5 } }}
+          onReadingSent={() => void refresh()}
+          onConnect={m => {
+            setSensorConnectMachine(m)
+            setModal('sensor-connect')
+          }}
+        />
+
+        {/* Individual Machine Usable Limits Manager */}
+        <IndividualMachineLimitsConfig
+          machines={machines}
+          shared={limits}
+          onSaved={() => void refresh()}
+          onConnect={m => {
+            setSensorConnectMachine(m)
+            setModal('sensor-connect')
+          }}
+        />
+
+        <section className="panel settings-panel"><div className="panel-heading"><div><p className="eyebrow">ENGINEERING ASSUMPTIONS</p><h2>Shared baseline limits &amp; downtime scenario</h2><p className="panel-subtitle">Set plant-wide fallback bounds and planning assumptions. Individual machines can override these above.</p></div><Settings2 size={18} /></div>
           <form onSubmit={saveLimits} className="limits-form"><LimitInput label="Process temperature" unit="°C" value={limits.process_temperature} onChange={value => setLimits({ ...limits, process_temperature: value })} /><LimitInput label="Torque" unit="Nm" value={limits.torque} onChange={value => setLimits({ ...limits, torque: value })} /><LimitInput label="RPM lower bound" unit="rpm" value={limits.rotational_speed_low} onChange={value => setLimits({ ...limits, rotational_speed_low: value })} /><LimitInput label="RPM upper bound" unit="rpm" value={limits.rotational_speed_high} onChange={value => setLimits({ ...limits, rotational_speed_high: value })} /><LimitInput label="Tool wear" unit="index" value={limits.tool_wear} onChange={value => setLimits({ ...limits, tool_wear: value })} /><LimitInput label="Downtime cost" unit="$/hour" value={limits.downtime_cost_per_hour} onChange={value => setLimits({ ...limits, downtime_cost_per_hour: value })} /><LimitInput label="Repair duration" unit="hours" value={limits.estimated_repair_hours} onChange={value => setLimits({ ...limits, estimated_repair_hours: value })} /><div className="limit-save"><button className="button-primary" disabled={limits.rotational_speed_high <= limits.rotational_speed_low}><Check size={15} /> Save assumptions</button>{settingsMessage && <span className={settingsMessage.includes('Could not') || settingsMessage.includes('must') ? 'form-error' : 'save-message'}>{settingsMessage}</span>}</div></form>
         </section>
         <section className="panel standards-note"><div><p className="eyebrow">REFERENCE SCOPE</p><h2>Standards guide the process; equipment documents set the limits.</h2><p>ISO 17359:2018 provides general condition-monitoring programme guidance. ISO 20816-1:2016 concerns machine vibration measurement and evaluation, not temperature or torque limits. Neither supplies universal alarm values for these sensor fields.</p></div><div className="standards-links"><a href="https://www.iso.org/standard/71194.html" target="_blank" rel="noreferrer">ISO 17359:2018 <ArrowRight size={13} /></a><a href="https://www.iso.org/standard/63180.html" target="_blank" rel="noreferrer">ISO 20816-1:2016 <ArrowRight size={13} /></a></div><p className="standards-caveat">Use each machine manufacturer’s limits where published; otherwise have a qualified site engineer approve a profile and record the reference below. Inherited shared fallbacks remain explicitly unverified assumptions.</p></section>
         <section className="panel machine-limits-panel"><div className="panel-heading"><div><p className="eyebrow">EQUIPMENT-SPECIFIC CONFIGURATION</p><h2>Threshold profiles by machine</h2><p className="panel-subtitle">Overrides apply only to the selected asset. Every custom profile requires a source and reference.</p></div><Settings2 size={18} /></div><div className="machine-limit-list">{machines.map(machine => <MachineLimitEditor key={machine.machine_id} machine={machine} shared={limits} onSaved={() => void refresh()} />)}</div></section>
-        <ConnectionInstructions />
-      </section> : view === 'Events' ? <EventsView events={data?.events ?? []} machines={machines} refresh={refresh} /> : selectedMachine ? <MachineDetail machine={selectedMachine} onBack={() => { setSelectedId(''); const url = new URL(window.location.href); url.searchParams.delete('asset'); window.history.replaceState({}, '', url) }} onReport={() => { setChatOpen(false); setModal('report') }} onChat={() => setChatOpen(true)} onQR={() => { setChatOpen(false); setModal('qr') }} onLogAction={() => setModal('action')} onRemove={() => setModal('remove')} /> : <>
+      </section> : view === 'Events' ? <EventsView events={data?.events ?? []} machines={machines} refresh={refresh} /> : selectedMachine ? <MachineDetail machine={selectedMachine} onBack={() => { setSelectedId(''); const url = new URL(window.location.href); url.searchParams.delete('asset'); window.history.replaceState({}, '', url) }} onReport={() => { setChatOpen(false); setModal('report') }} onChat={() => setChatOpen(true)} onQR={() => { setChatOpen(false); setModal('qr') }} onLogAction={() => setModal('action')} onRemove={() => setModal('remove')} onConnect={() => { setSensorConnectMachine(selectedMachine); setModal('sensor-connect') }} /> : <>
         <section className="overview-heading"><div><p className="eyebrow">OPERATIONS / FLEET OVERVIEW</p><h1>Machine health, at a glance.</h1><p>Incoming measurements, equipment risk, and maintenance response in one place.</p></div><div className="overview-controls">{data?.connections.simulation.enabled ? <button className="button-secondary" onClick={() => void controlSimulation('pause')}><RefreshCw size={15} /> Pause demo</button> : <button className="button-primary" onClick={() => void controlSimulation('start')}><Zap size={15} /> Start demo</button>}<IconButton label="Reset five demo profiles" onClick={() => void controlSimulation('reset')}><RefreshCw size={16} /></IconButton><button className="button-secondary" onClick={() => setModal('qr')}><QrCode size={15} /> QR labels</button><button className="button-primary" onClick={() => setModal('register')}><Plus size={16} /> Register machine</button></div></section>
         <section className="metric-row" aria-label="Fleet summary"><FleetMetric label="Monitored assets" value={data?.metrics.total ?? '—'} detail={`${data?.metrics.simulation_assets ?? 0} in demo feed`} icon={<HardDrive size={17} />} /><FleetMetric label="Critical" value={data?.metrics.critical ?? '—'} detail="Immediate review" icon={<AlertCircle size={17} />} emphasis={(data?.metrics.critical ?? 0) > 0} onClick={() => setRiskFilter('Critical')} /><FleetMetric label="Attention" value={data?.metrics.attention ?? '—'} detail="Threshold exceeded" icon={<AlertTriangle size={17} />} onClick={() => setRiskFilter('Attention')} /><FleetMetric label="Within limits" value={data?.metrics.normal ?? '—'} detail="Latest reading in range" icon={<ShieldCheck size={17} />} /><FleetMetric label="Real devices" value={data?.metrics.real_connected ?? '—'} detail="REST / MQTT source" icon={<Radio size={17} />} onClick={() => setView('Connections')} /><FleetMetric label="Open events" value={data?.metrics.open_events ?? '—'} detail={`${data?.metrics.actions_due ?? 0} follow-ups due`} icon={<Wrench size={17} />} onClick={() => setView('Events')} /></section>
         {machines.length === 0 ? <EmptyFleet onRegister={() => setModal('register')} onConnections={() => setModal('connections')} /> : <>
@@ -520,14 +871,15 @@ function App() {
             <FleetTable machines={filteredMachines} selected={selectedId} select={id => setSelectedId(id)} />
           </section>
           <section className="lower-grid"><section className="panel recent-panel"><div className="panel-heading"><div><p className="eyebrow">LATEST SIGNALS</p><h2>Recent events</h2></div><button className="text-link" onClick={() => setView('Events')}>View event log <ArrowRight size={14} /></button></div>{(data?.events ?? []).slice(0, 4).length === 0 ? <p className="panel-empty">No machine events received.</p> : <div className="recent-events">{data?.events.slice(0, 4).map(event => <button key={event.id} className="recent-event" onClick={() => setSelectedId(event.machine_id)}><span className={`event-mini ${event.severity.toLowerCase()}`}><AlertTriangle size={14} /></span><span><strong>{event.machine_id}</strong><span>{event.condition}</span></span><time>{relativeTime(event.timestamp)}</time></button>)}</div>}</section>
-            <section className="panel links-panel"><div className="panel-heading"><div><p className="eyebrow">FIELD WORKFLOW</p><h2>Equipment access</h2></div><QrCode size={18} /></div><p>Print machine labels that open the matching dashboard record. Pair sensors separately through the secured gateway.</p><button className="button-secondary" onClick={() => setModal('qr')}><QrCode size={15} /> Create QR labels</button><button className="button-secondary" onClick={() => setModal('connections')}><Link2 size={15} /> View connection guide</button></section></section>
+            <section className="panel links-panel"><div className="panel-heading"><div><p className="eyebrow">FIELD WORKFLOW</p><h2>Equipment access</h2></div><QrCode size={18} /></div><p>Print machine labels that open the matching dashboard record. Pair sensors separately through the secured gateway.</p><button className="button-secondary" onClick={() => setModal('qr')}><QrCode size={15} /> Create QR labels</button><button className="button-secondary" onClick={() => setView('Connections')}><Link2 size={15} /> View sensor guide</button></section></section>
         </>}
       </>}
       <footer className="page-footer"><span><ShieldCheck size={14} /> Sensor readings remain on this local installation.</span><span>MAINTAIN-X <i /> API {data ? 'reachable' : 'checking'}</span></footer>
     </main>
     {chatOpen && <ChatPanel machine={selectedMachine} close={() => setChatOpen(false)} />}
     {modal === 'register' && <AddMachineModal close={() => setModal(null)} onCreated={() => void refresh()} shared={limits} />}
-    {modal === 'qr' && <QRModal machines={machines} close={() => setModal(null)} />}
+    {modal === 'qr' && <QRModal machines={machines} sharedLimits={limits} close={() => setModal(null)} onConnect={m => { setModal('sensor-connect'); setSensorConnectMachine(m) }} />}
+    {modal === 'sensor-connect' && sensorConnectMachine && <SensorConnectModal machine={sensorConnectMachine} shared={limits} connections={data?.connections ?? { rest: { name: 'REST', port: 8000, configured: false, endpoint: 'http://127.0.0.1:8000/api/ingest/v1/readings' }, mqtt: { configured: false, connected: false, detail: 'Not configured', host: '', port: 8883 }, websocket: 'ws://127.0.0.1:8000/ws', simulation: { enabled: false, source: 'synthetic-demo', tick: 0, interval_seconds: 1, machines: 5 } }} close={() => setModal(null)} onReadingSent={() => void refresh()} />}
     {modal === 'action' && selectedMachine && <LogActionModal machine={selectedMachine} close={() => setModal(null)} onSaved={() => { void refresh() }} />}
     {modal === 'remove' && selectedMachine && <RemoveMachineModal machine={selectedMachine} close={() => setModal(null)} onRemoved={removeSelected} />}
     {modal === 'connections' && <ConnectionModal connections={data?.connections ?? { rest: { name: 'REST', port: 8000, configured: false, endpoint: 'http://127.0.0.1:8000/api/ingest/v1/readings' }, mqtt: { configured: false, connected: false, detail: 'Not configured', host: '', port: 8883 }, websocket: 'ws://127.0.0.1:8000/ws', simulation: { enabled: false, source: 'synthetic-demo', tick: 0, interval_seconds: 1, machines: 5 } }} close={() => setModal(null)} />}
@@ -579,8 +931,690 @@ function MachineLimitEditor({ machine, shared, onSaved }: { machine: Machine; sh
   </details>
 }
 
-function ConnectionInstructions() {
-  return <section className="panel connection-instructions"><div><p className="eyebrow">GATEWAY QUICK START</p><h2>Send the first device reading</h2><p>Replace the sample fields with calibrated readings from your sensor driver. Configure the bearer token on a trusted gateway; do not expose the API directly to the public internet.</p></div><div className="terminal-card"><div><i /><i /><i /><span>PAYLOAD TEMPLATE · EXAMPLE VALUES</span></div><code>{'{ "machine_id": "PRESS-01",'}<br />{'  "process_temperature": YOUR_SENSOR_VALUE,'}<br />{'  "rotational_speed": YOUR_SENSOR_VALUE,'}<br />{'  "torque": YOUR_SENSOR_VALUE }'}</code></div></section>
+function IndividualMachineLimitsConfig({
+  machines,
+  shared,
+  onSaved,
+  onConnect,
+}: {
+  machines: Machine[]
+  shared: Limits
+  onSaved: () => void
+  onConnect: (machine: Machine) => void
+}) {
+  const [targetId, setTargetId] = useState<string>('NEW')
+  const [machineName, setMachineName] = useState('')
+  const [machineId, setMachineId] = useState('')
+  const [equipmentType, setEquipmentType] = useState('Industrial equipment')
+  const [criticality, setCriticality] = useState('1.0')
+
+  // Operating limits (anchored by default)
+  const [temp, setTemp] = useState<number>(shared.process_temperature)
+  const [torque, setTorque] = useState<number>(shared.torque)
+  const [rpmLow, setRpmLow] = useState<number>(shared.rotational_speed_low)
+  const [rpmHigh, setRpmHigh] = useState<number>(shared.rotational_speed_high)
+  const [toolWear, setToolWear] = useState<number>(shared.tool_wear)
+  const [source, setSource] = useState<'manufacturer' | 'site_engineering'>('site_engineering')
+  const [reference, setReference] = useState('Site engineering baseline calibration')
+
+  const [saving, setSaving] = useState(false)
+  const [feedback, setFeedback] = useState<{ type: 'success' | 'error'; text: string; machine?: Machine } | null>(null)
+
+  const handleSelect = (id: string) => {
+    setTargetId(id)
+    setFeedback(null)
+    if (id === 'NEW') {
+      setMachineName('')
+      setMachineId('')
+      setEquipmentType('Industrial equipment')
+      setCriticality('1.0')
+      setTemp(shared.process_temperature)
+      setTorque(shared.torque)
+      setRpmLow(shared.rotational_speed_low)
+      setRpmHigh(shared.rotational_speed_high)
+      setToolWear(shared.tool_wear)
+      setSource('site_engineering')
+      setReference('Site engineering baseline calibration')
+    } else {
+      const found = machines.find(m => m.machine_id === id)
+      if (found) {
+        setMachineName(found.machine_name || found.machine_id)
+        setMachineId(found.machine_id)
+        setEquipmentType(found.equipment_type || 'Industrial equipment')
+        setCriticality(String(found.criticality ?? 1.0))
+        const p = found.limit_profile
+        setTemp(p?.process_temperature ?? shared.process_temperature)
+        setTorque(p?.torque ?? shared.torque)
+        setRpmLow(p?.rotational_speed_low ?? shared.rotational_speed_low)
+        setRpmHigh(p?.rotational_speed_high ?? shared.rotational_speed_high)
+        setToolWear(p?.tool_wear ?? shared.tool_wear)
+        setSource(p?.source === 'manufacturer' ? 'manufacturer' : 'site_engineering')
+        setReference(p?.reference || 'Site engineering calibration')
+      }
+    }
+  }
+
+  const handleResetToBaseline = () => {
+    setTemp(shared.process_temperature)
+    setTorque(shared.torque)
+    setRpmLow(shared.rotational_speed_low)
+    setRpmHigh(shared.rotational_speed_high)
+    setToolWear(shared.tool_wear)
+    setFeedback(null)
+  }
+
+  const handleSubmit = async (e: FormEvent) => {
+    e.preventDefault()
+    const finalId = machineId.trim()
+    if (!finalId) {
+      setFeedback({ type: 'error', text: 'Machine ID is required.' })
+      return
+    }
+    if (rpmHigh <= rpmLow) {
+      setFeedback({ type: 'error', text: 'RPM upper limit must exceed lower limit.' })
+      return
+    }
+    setSaving(true)
+    setFeedback(null)
+
+    try {
+      const saved = await request<Machine>('/api/machines', {
+        method: 'POST',
+        body: JSON.stringify({
+          machine_id: finalId,
+          machine_name: machineName.trim() || finalId,
+          equipment_type: equipmentType.trim() || 'Industrial equipment',
+          criticality: Number(criticality) || 1.0,
+          limits: {
+            mode: 'custom',
+            process_temperature: temp,
+            torque: torque,
+            rotational_speed_low: rpmLow,
+            rotational_speed_high: rpmHigh,
+            tool_wear: toolWear,
+            source: source,
+            reference: reference.trim() || 'Site engineering calibration',
+          },
+        }),
+      })
+
+      setFeedback({
+        type: 'success',
+        text: `Usable limits for "${saved.machine_name || saved.machine_id}" saved! Operating thresholds are now active and anchored.`,
+        machine: saved,
+      })
+      onSaved()
+    } catch (err) {
+      setFeedback({
+        type: 'error',
+        text: err instanceof Error ? err.message : 'Could not save machine usable limits.',
+      })
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  return (
+    <section className="individual-limits-panel">
+      <div className="individual-limits-header">
+        <div>
+          <p className="eyebrow">EQUIPMENT PARAMETER CONFIGURATION</p>
+          <h2>Configure Individual Machine Usable Limits</h2>
+          <p className="panel-subtitle">
+            Manually type or select a machine and customize its usable limits. Non-customized parameters remain safely anchored to verified engineering defaults.
+          </p>
+        </div>
+        <Sliders size={20} style={{ color: 'var(--steel)' }} />
+      </div>
+
+      <form onSubmit={handleSubmit} className="individual-limits-form">
+        {/* Machine Target Selection */}
+        <div className="machine-target-row">
+          <label>
+            Select Target Machine
+            <select value={targetId} onChange={e => handleSelect(e.target.value)}>
+              <option value="NEW">+ Type &amp; Configure New Machine</option>
+              {machines.map(m => (
+                <option key={m.machine_id} value={m.machine_id}>
+                  {m.machine_name || m.machine_id} ({m.machine_id})
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Machine Name
+            <input
+              required
+              value={machineName}
+              onChange={e => setMachineName(e.target.value)}
+              placeholder="e.g. North Line Hydraulic Press"
+            />
+          </label>
+          <label>
+            Machine ID
+            <input
+              required
+              value={machineId}
+              onChange={e => setMachineId(e.target.value.toUpperCase())}
+              placeholder="e.g. PRESS-01"
+              disabled={targetId !== 'NEW'}
+            />
+          </label>
+          <label>
+            Equipment Type
+            <input
+              value={equipmentType}
+              onChange={e => setEquipmentType(e.target.value)}
+              placeholder="e.g. Hydraulic Press"
+            />
+          </label>
+          <label>
+            Criticality Multiplier
+            <select value={criticality} onChange={e => setCriticality(e.target.value)}>
+              <option value="0.5">0.5 · Standard</option>
+              <option value="1.0">1.0 · Standard</option>
+              <option value="2.0">2.0 · Important</option>
+              <option value="3.0">3.0 · High consequence</option>
+              <option value="5.0">5.0 · Essential process</option>
+            </select>
+          </label>
+        </div>
+
+        {/* Usable Limits Grid with Anchored Status Pills */}
+        <div className="limits-input-grid">
+          <div className={`limit-input-card ${temp === shared.process_temperature ? 'is-anchored' : 'is-custom'}`}>
+            <div className="limit-card-top">
+              <span>Process Temp</span>
+              <span className={`anchor-pill ${temp === shared.process_temperature ? 'anchored' : 'custom'}`}>
+                <Anchor size={9} /> {temp === shared.process_temperature ? 'Anchored' : 'Custom'}
+              </span>
+            </div>
+            <input type="number" value={temp} onChange={e => setTemp(Number(e.target.value))} min={20} max={150} step={0.5} />
+            <span className="limit-unit-hint">Limit in °C (Baseline: {shared.process_temperature}°C)</span>
+          </div>
+
+          <div className={`limit-input-card ${torque === shared.torque ? 'is-anchored' : 'is-custom'}`}>
+            <div className="limit-card-top">
+              <span>Torque Limit</span>
+              <span className={`anchor-pill ${torque === shared.torque ? 'anchored' : 'custom'}`}>
+                <Anchor size={9} /> {torque === shared.torque ? 'Anchored' : 'Custom'}
+              </span>
+            </div>
+            <input type="number" value={torque} onChange={e => setTorque(Number(e.target.value))} min={10} max={300} step={0.5} />
+            <span className="limit-unit-hint">Limit in Nm (Baseline: {shared.torque} Nm)</span>
+          </div>
+
+          <div className={`limit-input-card ${rpmLow === shared.rotational_speed_low ? 'is-anchored' : 'is-custom'}`}>
+            <div className="limit-card-top">
+              <span>RPM Lower Bound</span>
+              <span className={`anchor-pill ${rpmLow === shared.rotational_speed_low ? 'anchored' : 'custom'}`}>
+                <Anchor size={9} /> {rpmLow === shared.rotational_speed_low ? 'Anchored' : 'Custom'}
+              </span>
+            </div>
+            <input type="number" value={rpmLow} onChange={e => setRpmLow(Number(e.target.value))} min={0} max={9999} />
+            <span className="limit-unit-hint">Minimum RPM (Baseline: {shared.rotational_speed_low})</span>
+          </div>
+
+          <div className={`limit-input-card ${rpmHigh === shared.rotational_speed_high ? 'is-anchored' : 'is-custom'}`}>
+            <div className="limit-card-top">
+              <span>RPM Upper Bound</span>
+              <span className={`anchor-pill ${rpmHigh === shared.rotational_speed_high ? 'anchored' : 'custom'}`}>
+                <Anchor size={9} /> {rpmHigh === shared.rotational_speed_high ? 'Anchored' : 'Custom'}
+              </span>
+            </div>
+            <input type="number" value={rpmHigh} onChange={e => setRpmHigh(Number(e.target.value))} min={1} max={10000} />
+            <span className="limit-unit-hint">Maximum RPM (Baseline: {shared.rotational_speed_high})</span>
+          </div>
+
+          <div className={`limit-input-card ${toolWear === shared.tool_wear ? 'is-anchored' : 'is-custom'}`}>
+            <div className="limit-card-top">
+              <span>Tool Wear Limit</span>
+              <span className={`anchor-pill ${toolWear === shared.tool_wear ? 'anchored' : 'custom'}`}>
+                <Anchor size={9} /> {toolWear === shared.tool_wear ? 'Anchored' : 'Custom'}
+              </span>
+            </div>
+            <input type="number" value={toolWear} onChange={e => setToolWear(Number(e.target.value))} min={0} max={1000} />
+            <span className="limit-unit-hint">Indicator index (Baseline: {shared.tool_wear})</span>
+          </div>
+        </div>
+
+        {/* Provenance Fields */}
+        <div className="provenance-fields" style={{ margin: 0 }}>
+          <label>
+            Threshold Approval Source
+            <select value={source} onChange={e => setSource(e.target.value as 'manufacturer' | 'site_engineering')}>
+              <option value="site_engineering">Site engineering approval</option>
+              <option value="manufacturer">Manufacturer manual / OEM datasheet</option>
+            </select>
+          </label>
+          <label>
+            Document Reference / Approval Note
+            <input
+              required
+              value={reference}
+              onChange={e => setReference(e.target.value)}
+              placeholder="e.g. OEM Manual Rev 2, Section 4.1 or Engineering Work Order #1042"
+            />
+          </label>
+        </div>
+
+        {/* Action Row */}
+        <div className="anchor-actions-row">
+          <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+            <button type="submit" className="button-primary" disabled={saving || rpmHigh <= rpmLow}>
+              {saving ? <LoaderCircle size={15} className="spin" /> : <Check size={15} />}
+              Save Usable Limits
+            </button>
+            <button type="button" className="button-secondary" onClick={handleResetToBaseline}>
+              <RefreshCw size={13} /> Reset to Anchored Defaults
+            </button>
+          </div>
+          {feedback && (
+            <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+              <span className={feedback.type === 'success' ? 'save-message' : 'form-error'}>
+                {feedback.text}
+              </span>
+              {feedback.machine && (
+                <button
+                  type="button"
+                  className="button-primary small-button"
+                  onClick={() => onConnect(feedback.machine!)}
+                >
+                  <Radio size={13} /> Connect Sensor / QR for {feedback.machine.machine_id}
+                </button>
+              )}
+            </div>
+          )}
+        </div>
+      </form>
+    </section>
+  )
+}
+
+function RealSensorsGuide({
+  machines,
+  shared,
+  connections,
+  onReadingSent,
+  onConnect,
+}: {
+  machines: Machine[]
+  shared: Limits
+  connections: Dashboard['connections']
+  onReadingSent: () => void
+  onConnect: (machine: Machine) => void
+}) {
+  const [activeTab, setActiveTab] = useState<'esp32' | 'python' | 'mqtt' | 'curl'>('esp32')
+  const [selectedMachineId, setSelectedMachineId] = useState<string>(machines[0]?.machine_id ?? 'PRESS-01')
+  const [gatewayHost, setGatewayHost] = useState(window.location.hostname || '127.0.0.1')
+  const [token, setToken] = useState('replace-with-a-long-random-secret')
+  const [copied, setCopied] = useState(false)
+
+  // Interactive Live Tester state
+  const [testTemp, setTestTemp] = useState(68.5)
+  const [testSpeed, setTestSpeed] = useState(1480)
+  const [testTorque, setTestTorque] = useState(74.0)
+  const [testSending, setTestSending] = useState(false)
+  const [testResult, setTestResult] = useState<{ status: 'success' | 'error'; text: string } | null>(null)
+
+  const machine = machines.find(m => m.machine_id === selectedMachineId) ?? machines[0]
+  const limits = machine?.limit_profile?.mode === 'custom' ? machine.limit_profile : shared
+  const ingestUrl = `http://${gatewayHost}:${connections.rest.port}/api/ingest/v1/readings`
+
+  const esp32Code = `/*
+ * MAINTAIN-X Physical Sensor Transmitter
+ * Target Machine: ${machine?.machine_name || selectedMachineId} (${selectedMachineId})
+ * Hardware: ESP32 / ESP8266 / Arduino WiFi
+ */
+#include <WiFi.h>
+#include <HTTPClient.h>
+
+const char* WIFI_SSID     = "YOUR_WIFI_SSID";
+const char* WIFI_PASSWORD = "YOUR_WIFI_PASSWORD";
+const char* INGEST_URL    = "${ingestUrl}";
+const char* INGEST_TOKEN  = "${token}";
+const char* MACHINE_ID    = "${selectedMachineId}";
+
+void setup() {
+  Serial.begin(115200);
+  WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+  Serial.print("Connecting to WiFi");
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\\nWiFi Connected! IP: " + WiFi.localIP().toString());
+}
+
+void loop() {
+  if (WiFi.status() == WL_CONNECTED) {
+    HTTPClient http;
+    http.begin(INGEST_URL);
+    http.addHeader("Content-Type", "application/json");
+    if (strlen(INGEST_TOKEN) > 0) {
+      http.addHeader("Authorization", String("Bearer ") + INGEST_TOKEN);
+    }
+
+    // 1. Read your physical sensors:
+    // - Temp: MAX6675 thermocouple or DS18B20
+    // - RPM: Optical encoder or Hall pulse counter
+    // - Torque: ACS712 CT current or load cell ADC
+    float process_temp = 68.2;  // Usable limit: ${limits.process_temperature} C
+    float rpm          = 1480.0; // Usable band: ${limits.rotational_speed_low}-${limits.rotational_speed_high} rpm
+    float torque       = 74.5;   // Usable limit: ${limits.torque} Nm
+    float tool_wear    = 120.0;  // Indicator limit: ${limits.tool_wear}
+
+    String json = "{\\"machine_id\\":\\"" + String(MACHINE_ID) + "\\","
+      + "\\"equipment_type\\":\\"${machine?.equipment_type || 'Industrial equipment'}\\","
+      + "\\"process_temperature\\":" + String(process_temp, 2) + ","
+      + "\\"rotational_speed\\":" + String(rpm, 1) + ","
+      + "\\"torque\\":" + String(torque, 2) + ","
+      + "\\"tool_wear\\":" + String(tool_wear, 1) + ","
+      + "\\"operating_state\\":\\"RUNNING\\"}";
+
+    int httpCode = http.POST(json);
+    Serial.printf("[HTTP] POST: %d (Payload: %s)\\n", httpCode, json.c_str());
+    http.end();
+  }
+  delay(2000); // 2-second telemetry interval
+}`
+
+  const pythonCode = `"""
+MAINTAIN-X Real Sensor Gateway Script
+Machine: ${machine?.machine_name || selectedMachineId} (${selectedMachineId})
+Platform: Raspberry Pi / Linux Gateway / Edge PC
+"""
+import time
+import requests
+
+INGEST_URL   = "${ingestUrl}"
+INGEST_TOKEN = "${token}"
+MACHINE_ID   = "${selectedMachineId}"
+EQUIPMENT    = "${machine?.equipment_type || 'Industrial equipment'}"
+
+def read_hardware_sensors():
+    # Read physical sensors over SPI, I2C, 1-Wire, GPIO, or Modbus:
+    return {
+        "process_temperature": 68.5,  # Usable limit: ${limits.process_temperature} C
+        "air_temperature": 26.0,
+        "rotational_speed": 1490.0,   # Usable band: ${limits.rotational_speed_low} - ${limits.rotational_speed_high} rpm
+        "torque": 76.2,               # Usable limit: ${limits.torque} Nm
+        "tool_wear": 125.0,           # Indicator limit: ${limits.tool_wear}
+        "operating_state": "RUNNING",
+    }
+
+def main():
+    print(f"Connecting sensors for {MACHINE_ID} to {INGEST_URL}...")
+    headers = {"Content-Type": "application/json"}
+    if INGEST_TOKEN:
+        headers["Authorization"] = f"Bearer {INGEST_TOKEN}"
+
+    while True:
+        try:
+            telemetry = {
+                "machine_id": MACHINE_ID,
+                "equipment_type": EQUIPMENT,
+                **read_hardware_sensors(),
+            }
+            res = requests.post(INGEST_URL, json=telemetry, headers=headers, timeout=5)
+            if res.status_code == 200:
+                risk = res.json().get("assessment", {}).get("risk", "Unknown")
+                print(f"[OK 200] Telemetry delivered! Health assessment: {risk}")
+            else:
+                print(f"[ERR {res.status_code}] Response: {res.text}")
+        except Exception as err:
+            print(f"[DISCONNECTED] Retrying gateway connection: {err}")
+        time.sleep(2.0)
+
+if __name__ == "__main__":
+    main()`
+
+  const mqttCode = `"""
+MAINTAIN-X Industrial MQTT Publisher
+Broker: ${connections.mqtt.host || 'mqtt.yourplant.local'} : ${connections.mqtt.port}
+Topic: maintain-x/${selectedMachineId}/readings
+"""
+import json
+import time
+import paho.mqtt.client as mqtt
+
+BROKER_HOST = "${connections.mqtt.host || '127.0.0.1'}"
+BROKER_PORT = ${connections.mqtt.port}
+TOPIC       = "maintain-x/${selectedMachineId}/readings"
+
+client = mqtt.Client(client_id="sensor-gateway-${selectedMachineId}")
+# client.username_pw_set("username", "password")
+# client.tls_set() # Enable if TLS 8883 is used
+client.connect(BROKER_HOST, BROKER_PORT, 60)
+client.loop_start()
+
+while True:
+    payload = {
+        "machine_id": "${selectedMachineId}",
+        "process_temperature": 68.4,
+        "rotational_speed": 1485.0,
+        "torque": 75.1,
+        "tool_wear": 122.0,
+        "operating_state": "RUNNING"
+    }
+    client.publish(TOPIC, json.dumps(payload), qos=1)
+    print(f"Published telemetry to {TOPIC}")
+    time.sleep(2.0)`
+
+  const curlCode = `curl -X POST ${ingestUrl} \\
+  -H "Authorization: Bearer ${token}" \\
+  -H "Content-Type: application/json" \\
+  -d '{"machine_id":"${selectedMachineId}","equipment_type":"${machine?.equipment_type || 'Industrial equipment'}","process_temperature":68.5,"rotational_speed":1480,"torque":75.0,"tool_wear":120,"operating_state":"RUNNING"}'`
+
+  const activeSnippet = activeTab === 'esp32' ? esp32Code : activeTab === 'python' ? pythonCode : activeTab === 'mqtt' ? mqttCode : curlCode
+
+  const copySnippet = async () => {
+    await navigator.clipboard.writeText(activeSnippet)
+    setCopied(true)
+    setTimeout(() => setCopied(false), 1500)
+  }
+
+  const sendTestIngest = async () => {
+    setTestSending(true)
+    setTestResult(null)
+    try {
+      const payload = {
+        machine_id: selectedMachineId,
+        equipment_type: machine?.equipment_type || 'Industrial equipment',
+        process_temperature: testTemp,
+        rotational_speed: testSpeed,
+        torque: testTorque,
+        tool_wear: 110,
+        operating_state: 'RUNNING',
+      }
+      const res = await fetch(`${API}/api/ingest/v1/readings`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
+        },
+        body: JSON.stringify(payload),
+      })
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({ detail: res.statusText }))
+        throw new Error(err.detail ?? `HTTP ${res.status}`)
+      }
+      const data = await res.json()
+      setTestResult({
+        status: 'success',
+        text: `✓ Live telemetry received by API! Assessment Risk: "${data?.assessment?.risk ?? 'Normal'}". WebSocket refreshed.`,
+      })
+      onReadingSent()
+    } catch (e) {
+      setTestResult({
+        status: 'error',
+        text: `✗ Ingestion rejected: ${e instanceof Error ? e.message : 'Connection failed.'} Check token or server status.`,
+      })
+    } finally {
+      setTestSending(false)
+    }
+  }
+
+  return (
+    <section className="real-sensor-guide">
+      <div className="guide-header-badge">
+        <Cpu size={14} /> PRODUCTION REAL SENSOR GUIDE
+      </div>
+      <h2>How to Connect Real Sensors to the Dashboard</h2>
+      <p className="panel-subtitle">
+        Everything you need to stream live readings from physical transducers into MAINTAIN-X over HTTP or MQTT.
+      </p>
+
+      {/* Answer Callout: Do we need to upload code? */}
+      <div className="guide-answer-callout">
+        <h3>Do we need to upload any code to connect sensors?</h3>
+        <p>
+          <strong>YES! Physical sensors require firmware code on a microcontroller or edge gateway.</strong>
+          <br />
+          Physical transducers (like thermocouples, Hall effect sensors, and CT current clamps) output analog voltages or raw electrical pulses—they cannot speak directly to web browsers. To ingest live data, wire your sensors to a micro-controller (<strong>ESP32</strong>, <strong>Arduino WiFi</strong>) or an edge computer (<strong>Raspberry Pi</strong>). That device executes the code below, which samples your sensor pins, packages the measurements into JSON, and sends an authenticated <code>POST /api/ingest/v1/readings</code> request.
+        </p>
+      </div>
+
+      {/* Architecture Strip */}
+      <div className="architecture-strip">
+        <div className="arch-step">
+          <span className="arch-step-badge">1</span>
+          <div className="arch-step-content"><strong>Physical Sensors</strong><span>MAX6675, Hall, CT clamp</span></div>
+        </div>
+        <div className="arch-divider"><ArrowRight size={14} /></div>
+        <div className="arch-step">
+          <span className="arch-step-badge">2</span>
+          <div className="arch-step-content"><strong>Microcontroller / Pi</strong><span>Runs sensor driver firmware</span></div>
+        </div>
+        <div className="arch-divider"><ArrowRight size={14} /></div>
+        <div className="arch-step">
+          <span className="arch-step-badge">3</span>
+          <div className="arch-step-content"><strong>Local WiFi / LAN</strong><span>Secured private network</span></div>
+        </div>
+        <div className="arch-divider"><ArrowRight size={14} /></div>
+        <div className="arch-step">
+          <span className="arch-step-badge">4</span>
+          <div className="arch-step-content"><strong>REST / MQTT Ingest</strong><span>POST /api/ingest/v1/readings</span></div>
+        </div>
+        <div className="arch-divider"><ArrowRight size={14} /></div>
+        <div className="arch-step">
+          <span className="arch-step-badge">5</span>
+          <div className="arch-step-content"><strong>Live Dashboard</strong><span>Real-time WebSocket alerts</span></div>
+        </div>
+      </div>
+
+      {/* Sensor Hardware Matrix */}
+      <div className="sensor-matrix-grid">
+        <article className="sensor-card">
+          <div className="sensor-card-top"><Thermometer size={16} /> Process Temperature</div>
+          <strong>MAX6675 / DS18B20</strong>
+          <p>K-type thermocouple with SPI amplifier or 1-Wire probe attached to bearing/chassis.</p>
+          <code>Field: process_temperature (°C)</code>
+        </article>
+        <article className="sensor-card">
+          <div className="sensor-card-top"><Gauge size={16} /> Rotational Speed</div>
+          <strong>Optical / Hall Pulse Counter</strong>
+          <p>TCRT5000 IR sensor or 3144 Hall-effect sensor on interrupt pin counting pulses per rev.</p>
+          <code>Field: rotational_speed (rpm)</code>
+        </article>
+        <article className="sensor-card">
+          <div className="sensor-card-top"><Zap size={16} /> Motor Torque / Load</div>
+          <strong>ACS712 / CT Current Clamp</strong>
+          <p>SCT-013 non-invasive current sensor or strain gauge + HX711 24-bit ADC module.</p>
+          <code>Field: torque (Nm)</code>
+        </article>
+        <article className="sensor-card">
+          <div className="sensor-card-top"><Activity size={16} /> Tool Wear / Vibration</div>
+          <strong>Spindle Counter / Piezo RMS</strong>
+          <p>Accumulated cutting hours or SW-420 / ADXL345 vibration intensity indicator.</p>
+          <code>Field: tool_wear (index)</code>
+        </article>
+      </div>
+
+      {/* Interactive Code Generator */}
+      <div className="code-generator-section">
+        <div className="code-generator-controls">
+          <label>
+            Tailor for Machine:
+            <select value={selectedMachineId} onChange={e => setSelectedMachineId(e.target.value)}>
+              {machines.map(m => (
+                <option key={m.machine_id} value={m.machine_id}>
+                  {m.machine_name || m.machine_id} ({m.machine_id})
+                </option>
+              ))}
+            </select>
+          </label>
+          <label>
+            Server Host IP:
+            <input value={gatewayHost} onChange={e => setGatewayHost(e.target.value)} placeholder="192.168.1.100" />
+          </label>
+          <label>
+            Ingest Token:
+            <input value={token} onChange={e => setToken(e.target.value)} placeholder="Bearer token" />
+          </label>
+          {machine && (
+            <button className="button-secondary small-button" style={{ marginLeft: 'auto' }} onClick={() => onConnect(machine)}>
+              <QrCode size={13} /> View QR &amp; Setup for {selectedMachineId}
+            </button>
+          )}
+        </div>
+
+        <div className="code-lang-tabs">
+          <button className={`code-lang-tab ${activeTab === 'esp32' ? 'active' : ''}`} onClick={() => setActiveTab('esp32')}>
+            <Cpu size={13} style={{ marginRight: 4 }} /> ESP32 / Arduino (C++)
+          </button>
+          <button className={`code-lang-tab ${activeTab === 'python' ? 'active' : ''}`} onClick={() => setActiveTab('python')}>
+            <Terminal size={13} style={{ marginRight: 4 }} /> Raspberry Pi / Python
+          </button>
+          <button className={`code-lang-tab ${activeTab === 'mqtt' ? 'active' : ''}`} onClick={() => setActiveTab('mqtt')}>
+            <Radio size={13} style={{ marginRight: 4 }} /> MQTT Publisher
+          </button>
+          <button className={`code-lang-tab ${activeTab === 'curl' ? 'active' : ''}`} onClick={() => setActiveTab('curl')}>
+            <Code size={13} style={{ marginRight: 4 }} /> cURL Test Command
+          </button>
+        </div>
+
+        <div className="code-display-wrap">
+          <div className="code-display-actions">
+            <button className="code-copy-btn" onClick={copySnippet}>
+              {copied ? <Check size={13} /> : <Copy size={13} />}
+              {copied ? 'Copied code' : 'Copy code snippet'}
+            </button>
+          </div>
+          <pre><code>{activeSnippet}</code></pre>
+        </div>
+      </div>
+
+      {/* Interactive Live Ingest Test Console */}
+      <div className="live-ingest-tester">
+        <h4>Interactive Telemetry Ingest Test</h4>
+        <p>Send a real test packet directly from your browser to verify API readiness and watch the live fleet update.</p>
+        <div className="tester-inputs">
+          <label>
+            Process Temp (°C)
+            <input type="number" value={testTemp} onChange={e => setTestTemp(Number(e.target.value))} step={0.5} />
+          </label>
+          <label>
+            Speed (RPM)
+            <input type="number" value={testSpeed} onChange={e => setTestSpeed(Number(e.target.value))} />
+          </label>
+          <label>
+            Torque (Nm)
+            <input type="number" value={testTorque} onChange={e => setTestTorque(Number(e.target.value))} step={0.5} />
+          </label>
+        </div>
+        <button className="button-primary small-button" onClick={sendTestIngest} disabled={testSending}>
+          {testSending ? <LoaderCircle size={14} className="spin" /> : <Zap size={14} />}
+          Test Ingestion for {selectedMachineId}
+        </button>
+        {testResult && (
+          <div className={`tester-response ${testResult.status}`}>
+            {testResult.text}
+          </div>
+        )}
+      </div>
+    </section>
+  )
 }
 
 function ReportPreview({ machine, onDownload, busy, error }: { machine: Machine; onDownload: () => void; busy: boolean; error: string }) {
